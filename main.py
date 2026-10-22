@@ -10,9 +10,11 @@ Opracowanie pomiarów charakterystyk I-V diod LED:
   6) wykresy lnI = f(V) i współczynnik idealności n = q/(k_B T a).
 
 Pliki .tsv: kolumna 1 - napięcie [V], kolumna 2 - prąd [A].
-Wyniki: katalog `wykresy/` oraz plik `wyniki.csv`.
+Wyniki: katalog `wykresy/` oraz pliki `wyniki_sprawozdanie.json` i `wyniki_sprawozdanie.txt`.
 """
 
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -59,6 +61,10 @@ DIODY = [
 
 # na wykresach lnI pomijane są prądy poniżej progu (szum rzędu rozdzielczości amperomierza)
 PROG_LN_WYKRES = 5e-6  # A
+
+# tabela pomiarów w raporcie: punkty o prądach rozłożonych logarytmicznie od PROG_TABELI do I_max
+PUNKTY_TABELI = 20
+PROG_TABELI = 1e-5  # A
 
 KATALOG = Path(__file__).resolve().parent
 KATALOG_WYKRESOW = KATALOG / "wykresy"
@@ -121,6 +127,7 @@ def analizuj(dioda):
     n_id = q_kT / a_ln
     u_n = q_kT * da_ln / a_ln ** 2
     Is = np.exp(b_ln)
+    u_Is = Is * db_ln
 
     return {
         "U": U, "I": I, "uU": uU, "uI": uI,
@@ -129,7 +136,7 @@ def analizuj(dioda):
         "Vbi": Vbi, "uVbi": uVbi, "Rs": Rs, "uRs": uRs,
         "Eg_lam": Eg_lam, "uEg_lam": uEg_lam, "Eg_Vbi": Eg_Vbi, "uEg_Vbi": uEg_Vbi,
         "a_ln": a_ln, "b_ln": b_ln, "da_ln": da_ln, "db_ln": db_ln, "r2_ln": r2_ln,
-        "n": n_id, "u_n": u_n, "Is": Is,
+        "n": n_id, "u_n": u_n, "Is": Is, "u_Is": u_Is,
     }
 
 
@@ -228,39 +235,181 @@ def wykresy_zbiorcze(wyniki):
     plt.close(fig)
 
 
-def raport(wyniki):
-    print(f"T = {T} K,  q/(k_B T) = {E / (KB * T):.3f} 1/V")
-    print(f"Multimetr U: ±({MULTIMETR_U['proc']}% + {MULTIMETR_U['dgt']} dgt), "
-          f"rozdz. {MULTIMETR_U['rozdzielczosc']} V")
-    print(f"Multimetr I: ±({MULTIMETR_I['proc']}% + {MULTIMETR_I['dgt']} dgt), "
-          f"rozdz. {MULTIMETR_I['rozdzielczosc']} A\n")
+def zaokraglij(val, unc, cyfry=2):
+    """Niepewność do `cyfry` cyfr znaczących, wartość do tego samego miejsca dziesiętnego."""
+    if unc is None or not np.isfinite(unc) or unc <= 0:
+        return {"val": f"{val:.6g}", "unc": None}
+    rzad = math.floor(math.log10(unc))
+    if rzad < -4 or rzad > 5:
+        wykladnik = math.floor(math.log10(abs(val))) if val != 0 else rzad
+        val, unc = val / 10 ** wykladnik, unc / 10 ** wykladnik
+        miejsca = max(cyfry - 1 - math.floor(math.log10(unc)), 0)
+        return {"val": f"{val:.{miejsca}f}e{wykladnik}", "unc": f"{unc:.{miejsca}f}e{wykladnik}"}
+    miejsca = cyfry - 1 - rzad
+    if miejsca > 0:
+        return {"val": f"{val:.{miejsca}f}", "unc": f"{unc:.{miejsca}f}"}
+    return {"val": f"{round(val, miejsca):.0f}", "unc": f"{round(unc, miejsca):.0f}"}
+
+
+def pm(wartosc):
+    return f"({wartosc['val']} +/- {wartosc['unc']})"
+
+
+def wybrane_punkty(w):
+    """Indeksy punktów o prądach rozłożonych logarytmicznie od PROG_TABELI do I_max."""
+    lnI = np.log(np.clip(w["I"], 1e-12, None))
+    cele = np.log(np.geomspace(PROG_TABELI, w["I"].max(), PUNKTY_TABELI))
+    return sorted({int(np.argmin(np.abs(lnI - c))) for c in cele})
+
+
+def zbuduj_raport(wyniki):
+    u_lambda = DELTA_LAMBDA_NM / np.sqrt(3)
+    raport = {
+        "cwiczenie": "Ćw. 1 - Dioda elektroluminescencyjna (LED), Laboratorium Fizyka 3.3",
+        "parametry_obliczen": {
+            "T_K": T,
+            "q_kBT_1_per_V": round(E / (KB * T), 3),
+            "delta_lambda_nm": DELTA_LAMBDA_NM,
+            "u_lambda_nm": round(u_lambda, 2),
+            "multimetr_U": {**MULTIMETR_U, "jednostka": "V"},
+            "multimetr_I": {**MULTIMETR_I, "jednostka": "A"},
+            "wzor_niepewnosci_miernika": "u = (proc% * |odczyt| + dgt * rozdzielczosc) / sqrt(3)",
+        },
+        "parametry_fizyczne": {},
+        "wybrane_pomiary": {},
+    }
 
     for dioda, w in wyniki:
-        print(f"=== Dioda {dioda['nazwa']} (λ = {dioda['lambda_nm']} nm) ===")
-        print(f"  Prosta I(U), {w['maska_duze'].sum()} pkt (I >= {dioda['frac_duze']:.0%} I_max):")
-        print(f"    a = ({w['a']:.5f} ± {w['da']:.5f}) A/V,  b = ({w['b']:.5f} ± {w['db']:.5f}) A,"
-              f"  R² = {w['r2']:.5f}")
-        print(f"    V_bi = ({w['Vbi']:.4f} ± {w['uVbi']:.4f}) V")
-        print(f"    R_s  = ({w['Rs']:.3f} ± {w['uRs']:.3f}) Ω")
-        print(f"  E_g = hc/λ   = ({w['Eg_lam']:.4f} ± {w['uEg_lam']:.4f}) eV")
-        print(f"  E_g = e·V_bi = ({w['Eg_Vbi']:.4f} ± {w['uEg_Vbi']:.4f}) eV"
-              f"  (różnica {w['Eg_Vbi'] - w['Eg_lam']:+.3f} eV, "
-              f"{(w['Eg_Vbi'] - w['Eg_lam']) / w['Eg_lam']:+.1%})")
+        klucz = Path(dioda["plik"]).stem
+        U, I = w["U"], w["I"]
+        md, ml = w["maska_duze"], w["maska_ln"]
         i_min, i_max = dioda["zakres_ln"]
-        print(f"  Prosta lnI(U), {w['maska_ln'].sum()} pkt ({i_min:g} A <= I <= {i_max:g} A):")
-        print(f"    a = ({w['a_ln']:.4f} ± {w['da_ln']:.4f}) 1/V,  b = ({w['b_ln']:.4f} ± {w['db_ln']:.4f}),"
-              f"  R² = {w['r2_ln']:.5f}")
-        print(f"    n = {w['n']:.4f} ± {w['u_n']:.4f},  I_s = exp(b) = {w['Is']:.3e} A\n")
+        roznica = w["Eg_Vbi"] - w["Eg_lam"]
 
-    naglowek = ("dioda;lambda_nm;a_A_V;u_a;b_A;u_b;R2;Vbi_V;u_Vbi;Rs_Ohm;u_Rs;"
-                "Eg_lambda_eV;u_Eg_lambda;Eg_Vbi_eV;u_Eg_Vbi;a_ln_1_V;u_a_ln;b_ln;u_b_ln;R2_ln;n;u_n;Is_A")
-    wiersze = [naglowek]
-    for dioda, w in wyniki:
-        wartosci = [w[k] for k in ("a", "da", "b", "db", "r2", "Vbi", "uVbi", "Rs", "uRs",
-                                   "Eg_lam", "uEg_lam", "Eg_Vbi", "uEg_Vbi", "a_ln", "da_ln",
-                                   "b_ln", "db_ln", "r2_ln", "n", "u_n", "Is")]
-        wiersze.append(";".join([dioda["nazwa"], str(dioda["lambda_nm"])] + [f"{v:.6g}" for v in wartosci]))
-    (KATALOG / "wyniki.csv").write_text("\n".join(wiersze) + "\n", encoding="utf-8-sig")
+        raport["parametry_fizyczne"][klucz] = {
+            "nazwa": dioda["nazwa"],
+            "lambda_nm": dioda["lambda_nm"],
+            "liczba_punktow_pomiarowych": int(len(U)),
+            "I_max_mA": round(float(I.max()) * 1e3, 3),
+            "prosta_I_od_U": {
+                "kryterium": f"I >= {dioda['frac_duze']:.0%} I_max",
+                "zakres_U_V": [round(float(U[md].min()), 4), round(float(U[md].max()), 4)],
+                "zakres_I_mA": [round(float(I[md].min()) * 1e3, 3), round(float(I[md].max()) * 1e3, 3)],
+                "liczba_punktow": int(md.sum()),
+                "a_mA_per_V": zaokraglij(w["a"] * 1e3, w["da"] * 1e3),
+                "b_mA": zaokraglij(w["b"] * 1e3, w["db"] * 1e3),
+                "R2": round(w["r2"], 5),
+            },
+            "Vbi_V": zaokraglij(w["Vbi"], w["uVbi"]),
+            "Rs_ohm": zaokraglij(w["Rs"], w["uRs"]),
+            "Eg_lambda_eV": zaokraglij(w["Eg_lam"], w["uEg_lam"]),
+            "Eg_Vbi_eV": zaokraglij(w["Eg_Vbi"], w["uEg_Vbi"]),
+            "roznica_Eg_Vbi_minus_Eg_lambda_eV": round(roznica, 3),
+            "roznica_wzgledna_procent": round(roznica / w["Eg_lam"] * 100, 1),
+            "prosta_lnI_od_U": {
+                "zakres_I_A": [i_min, i_max],
+                "zakres_U_V": [round(float(U[ml].min()), 4), round(float(U[ml].max()), 4)],
+                "liczba_punktow": int(ml.sum()),
+                "a_1_per_V": zaokraglij(w["a_ln"], w["da_ln"]),
+                "b": zaokraglij(w["b_ln"], w["db_ln"]),
+                "R2": round(w["r2_ln"], 5),
+            },
+            "n": zaokraglij(w["n"], w["u_n"]),
+            "Is_A": zaokraglij(w["Is"], w["u_Is"]),
+        }
+
+        raport["wybrane_pomiary"][klucz] = [
+            {
+                "lp": lp,
+                "U_V": zaokraglij(U[i], w["uU"][i]),
+                "I_mA": zaokraglij(I[i] * 1e3, w["uI"][i] * 1e3),
+                "ln_I": zaokraglij(np.log(I[i]), w["uI"][i] / I[i]),
+            }
+            for lp, i in enumerate(wybrane_punkty(w), start=1)
+        ]
+    return raport
+
+
+def raport_txt(raport):
+    linia = "=" * 80
+    p = raport["parametry_obliczen"]
+    mu, mi = p["multimetr_U"], p["multimetr_I"]
+    out = [
+        linia,
+        "PODSUMOWANIE WYNIKÓW DO SPRAWOZDANIA - ĆWICZENIE 1",
+        "Dioda elektroluminescencyjna (LED) - charakterystyki I-V diod LED",
+        linia,
+        "",
+        "PARAMETRY OBLICZEŃ",
+        f"   Temperatura T             : {p['T_K']} K,  q/(k_B T) = {p['q_kBT_1_per_V']} 1/V",
+        f"   Niepewność długości fali  : Δλ = {p['delta_lambda_nm']} nm,  u(λ) = Δλ/sqrt(3) = {p['u_lambda_nm']} nm",
+        f"   Woltomierz                : ±({mu['proc']}% rdg + {mu['dgt']} dgt), rozdzielczość {mu['rozdzielczosc']} V",
+        f"   Amperomierz               : ±({mi['proc']}% rdg + {mi['dgt']} dgt), rozdzielczość {mi['rozdzielczosc']} A",
+        f"   Niepewność miernika       : {p['wzor_niepewnosci_miernika']}",
+        "",
+    ]
+
+    for nr, (klucz, d) in enumerate(raport["parametry_fizyczne"].items(), start=1):
+        pr, pl = d["prosta_I_od_U"], d["prosta_lnI_od_U"]
+        out += [
+            f"{nr}. DIODA {d['nazwa'].upper()} ({klucz}.tsv) - λ = {d['lambda_nm']} nm, "
+            f"N = {d['liczba_punktow_pomiarowych']} pkt, I_max = {d['I_max_mA']} mA",
+            f"   Prosta I = aU + b, {pr['kryterium']}: U = {pr['zakres_U_V'][0]} - {pr['zakres_U_V'][1]} V,"
+            f" I = {pr['zakres_I_mA'][0]} - {pr['zakres_I_mA'][1]} mA (N = {pr['liczba_punktow']})",
+            f"   Współczynnik kierunkowy a : {pm(pr['a_mA_per_V'])} mA/V",
+            f"   Wyraz wolny b             : {pm(pr['b_mA'])} mA",
+            f"   Współczynnik determinacji : R^2 = {pr['R2']}",
+            f"   Potencjał wbudowany V_bi  : {pm(d['Vbi_V'])} V",
+            f"   Oporność szeregowa R_s    : {pm(d['Rs_ohm'])} Ohm",
+            f"   Przerwa Eg = hc/λ         : {pm(d['Eg_lambda_eV'])} eV",
+            f"   Przerwa Eg = e*V_bi       : {pm(d['Eg_Vbi_eV'])} eV",
+            f"   Różnica Eg(V_bi) - Eg(λ)  : {d['roznica_Eg_Vbi_minus_Eg_lambda_eV']:+.3f} eV"
+            f" ({d['roznica_wzgledna_procent']:+.1f} %)",
+            f"   Prosta lnI = aU + b, I = {pl['zakres_I_A'][0]:g} - {pl['zakres_I_A'][1]:g} A:"
+            f" U = {pl['zakres_U_V'][0]} - {pl['zakres_U_V'][1]} V (N = {pl['liczba_punktow']})",
+            f"   Współczynnik kierunkowy a : {pm(pl['a_1_per_V'])} 1/V",
+            f"   Wyraz wolny b = ln(I_s)   : {pm(pl['b'])} [-]",
+            f"   Współczynnik determinacji : R^2 = {pl['R2']}",
+            f"   Współczynnik idealności n : {pm(d['n'])}",
+            f"   Prąd nasycenia I_s        : {pm(d['Is_A'])} A",
+            "",
+        ]
+
+    out += [
+        linia,
+        "TABELA ZBIORCZA",
+        linia,
+        f"{'Dioda':<14} | {'λ [nm]':>6} | {'V_bi [V]':>20} | {'R_s [Ohm]':>20} | {'Eg=hc/λ [eV]':>20} |"
+        f" {'Eg=eV_bi [eV]':>20} | {'n':>20}",
+        "-" * 140,
+    ]
+    for d in raport["parametry_fizyczne"].values():
+        out.append(
+            f"{d['nazwa']:<14} | {d['lambda_nm']:>6} | {pm(d['Vbi_V']):>20} | {pm(d['Rs_ohm']):>20} |"
+            f" {pm(d['Eg_lambda_eV']):>20} | {pm(d['Eg_Vbi_eV']):>20} | {pm(d['n']):>20}"
+        )
+
+    out += [
+        "",
+        linia,
+        f"WYBRANE PUNKTY POMIAROWE (ok. {PUNKTY_TABELI} na diodę, prądy rozłożone logarytmicznie"
+        f" od {PROG_TABELI:g} A do I_max; niepewności do 2 cyfr znaczących)",
+        linia,
+    ]
+    for klucz, punkty in raport["wybrane_pomiary"].items():
+        out += [
+            "",
+            f"Dioda {raport['parametry_fizyczne'][klucz]['nazwa']}",
+            f"{'Lp':>2} | {'U +/- u(U) [V]':>22} | {'I +/- u(I) [mA]':>24} | {'ln(I/1A) +/- u':>22}",
+            "-" * 80,
+        ]
+        for pkt in punkty:
+            out.append(
+                f"{pkt['lp']:>2} | {pkt['U_V']['val'] + ' +/- ' + pkt['U_V']['unc']:>22} |"
+                f" {pkt['I_mA']['val'] + ' +/- ' + pkt['I_mA']['unc']:>24} |"
+                f" {pkt['ln_I']['val'] + ' +/- ' + pkt['ln_I']['unc']:>22}"
+            )
+    return "\n".join(out) + "\n"
 
 
 def main():
@@ -273,9 +422,17 @@ def main():
         wykres_lnI(dioda, w)
         wyniki.append((dioda, w))
     wykresy_zbiorcze(wyniki)
-    raport(wyniki)
+
+    raport = zbuduj_raport(wyniki)
+    tekst = raport_txt(raport)
+    plik_json = KATALOG / "wyniki_sprawozdanie.json"
+    plik_txt = KATALOG / "wyniki_sprawozdanie.txt"
+    plik_json.write_text(json.dumps(raport, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    plik_txt.write_text(tekst, encoding="utf-8")
+
+    print(tekst)
     print(f"Wykresy zapisano w: {KATALOG_WYKRESOW}")
-    print(f"Tabela wyników:     {KATALOG / 'wyniki.csv'}")
+    print(f"Wyniki zapisano w:  {plik_json.name}, {plik_txt.name}")
 
 
 if __name__ == "__main__":
